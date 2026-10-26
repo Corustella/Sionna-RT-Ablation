@@ -61,6 +61,16 @@ class RTBackend:
         measurement = self.mesh("measurement", shifted, faces, material)
         return scene, measurement
 
+    def release_scene(self, scene, measurement):
+        """Break C++ holder -> Python material -> scene ownership cycles.
+
+        Call only after all results have synchronized to NumPy. The scene is
+        finished and must not be used for another solve after this teardown.
+        """
+        measurement.bsdf().radio_material = None
+        for shape in scene.mi_scene.shapes():
+            shape.bsdf().radio_material = None
+
     def lattice_slice(self, total, offset, count):
         """Evaluate the upstream Fibonacci formula only at the requested indices.
 

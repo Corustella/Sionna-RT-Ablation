@@ -59,6 +59,7 @@ def main(backend_name):
             print(f"seed={seed} {case}: positive cells={np.count_nonzero(gain)}/{len(gain)}, "
                   f"area-weighted mean gain={np.average(gain, weights=areas):.6g}", flush=True)
     print("RT integration check passed; this is not a mechanism-contribution estimate.")
+    backend.release_scene(scene, measurement)
     del scene, measurement
     gc.collect()
 

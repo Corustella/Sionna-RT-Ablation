@@ -161,14 +161,15 @@ def main(args):
                       interpolation_footprint=projector.footprint)
         for band in args.bands:
             scene, measurement = backend.scene(vertices, faces, height, item["tx_rc"], data.metadata, band)
-            for seed in args.seeds:
-                for config in CONFIGS:
-                    run_case(backend, scene, measurement, projector, len(faces), plan,
-                             band, sample, seed, config, out)
-            # Scene/material references form cycles; release finished scenes
-            # before loading the next terrain rather than accumulating BVHs.
-            del scene, measurement
-            gc.collect()
+            try:
+                for seed in args.seeds:
+                    for config in CONFIGS:
+                        run_case(backend, scene, measurement, projector, len(faces), plan,
+                                 band, sample, seed, config, out)
+            finally:
+                backend.release_scene(scene, measurement)
+                del scene, measurement
+                gc.collect()
     data.close()
     write_json(out / "completion.json", {"completed_utc": datetime.now(timezone.utc).isoformat(),
                "this_invocation_wall_seconds": time.perf_counter() - started, "case_runs": plan["count"]["case_runs"]})
