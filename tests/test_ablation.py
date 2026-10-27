@@ -86,6 +86,23 @@ class ScientificStatisticsTests(unittest.TestCase):
 
 
 class GeometryAndDataTests(unittest.TestCase):
+    def test_sparse_face_gain_does_not_create_false_positive_grid_cells(self):
+        # Interior grid nodes lie exactly halfway between two mesh centroids.
+        # The third Delaunay barycentric weight is mathematically zero.
+        for diagonal in ("nw_se", "ne_sw"):
+            _, faces, centers, _ = triangulate(np.zeros((32, 32)), 1., diagonal)
+            projector = GridProjector(centers, (32, 32), 1.)
+            gain = np.zeros(len(faces))
+            gain[::17] = 1e-12
+            cells = gain.reshape(31, 31, 2)
+            if diagonal == "nw_se":
+                expected = (cells[1:, :-1, 0] + cells[:-1, 1:, 1]) / 2
+            else:
+                expected = (cells[1:, 1:, 0] + cells[:-1, :-1, 1]) / 2
+            actual = projector.apply(gain)[1:-1, 1:-1]
+            np.testing.assert_array_equal(actual == 0, expected == 0)
+            np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=0)
+
     def test_up_normals_area_and_linear_grid_projection(self):
         rows, cols = np.indices((5, 6))
         height = 2 * cols + 3 * rows
@@ -135,6 +152,32 @@ class GeometryAndDataTests(unittest.TestCase):
 
 
 class AnalysisIntegrationTests(unittest.TestCase):
+    def test_reprojection_uses_saved_cell_gain_without_changing_raw_maps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, faces, centers, areas = triangulate(np.zeros((4, 4)), 1.)
+            projector = GridProjector(centers, (4, 4), 1.)
+            plan = {"samples": [{"sample_id": "a", "terrain_id": "t"}], "bands": ["58"],
+                    "seeds": [0, 1], "samples_per_tx": 100,
+                    "metadata": {"resolution_m_per_px": 1.}}
+            write_json(root / "manifest.json", {"experiment": plan})
+            write_npz(root / "inputs" / "a.npz", cell_areas=areas, cell_centers=centers,
+                      target_58=np.zeros((4, 4)), mask_58=np.ones((4, 4), bool),
+                      interpolation_footprint=projector.footprint)
+            cell_gain = np.zeros(len(faces))
+            cell_gain[6] = 1e-9
+            stored_grid = np.where(projector.footprint, 1e-30, np.nan)
+            for seed in (0, 1):
+                for case in CONFIGS:
+                    write_npz(root / "maps" / "a" / "58" / f"seed{seed}" / f"{case}.npz",
+                              cell_gain=cell_gain, grid_gain=stored_grid, samples=100)
+            _, _, labels, _ = analyze(root, reproject=True)
+            full = next(r for r in labels if r["seed"] == "mean" and r["configuration"] == "full")
+            self.assertEqual(full["positive_overlap_count"], 1)
+            self.assertAlmostEqual(full["rmse_db_on_positive_overlap"], -10 * np.log10(5e-10))
+            with np.load(root / "maps" / "a" / "58" / "seed0" / "full.npz") as saved:
+                np.testing.assert_array_equal(saved["grid_gain"], stored_grid)
+
     def test_interrupted_batches_resume_without_repeating_completed_work(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

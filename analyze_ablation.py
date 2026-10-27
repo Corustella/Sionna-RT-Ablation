@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from ablation_core import CONFIGS, compare_gains, label_diagnostic, safe_ratio, write_json
+from terrain_mesh import BARYCENTRIC_ZERO_TOLERANCE, GridProjector
 
 
 def pooled_statistics(records):
@@ -23,14 +24,20 @@ def pooled_statistics(records):
     return out
 
 
-def analyze(run):
+def analyze(run, reproject=False):
     manifest = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
     plan = manifest["experiment"]
     comparisons, labels, closure = [], [], []
+    projector = None
     for sample in plan["samples"]:
         sid = sample["sample_id"]
         with np.load(run / "inputs" / f"{sid}.npz", allow_pickle=False) as saved:
             inputs = {key: saved[key] for key in saved.files}
+        if reproject and projector is None:
+            projector = GridProjector(inputs["cell_centers"], inputs["interpolation_footprint"].shape,
+                                      plan["metadata"]["resolution_m_per_px"])
+        if reproject and not np.array_equal(projector.footprint, inputs["interpolation_footprint"]):
+            raise ValueError("Reprojection must preserve the original interpolation footprint")
         for band in plan["bands"]:
             by_seed = []
             for seed in plan["seeds"]:
@@ -43,6 +50,8 @@ def analyze(run):
                         if int(saved["samples"]) != plan["samples_per_tx"]:
                             raise ValueError(f"Unequal ray budgets: {path}")
                         cases[case] = {key: np.asarray(saved[key]) for key in ("cell_gain", "grid_gain")}
+                        if reproject:
+                            cases[case]["grid_gain"] = projector.apply(cases[case]["cell_gain"])
                 by_seed.append(cases)
             # Average linear estimates including zeros before any logarithm.
             averaged = {case: {key: np.mean([s[case][key] for s in by_seed], axis=0)
@@ -76,7 +85,8 @@ def main(args):
     out = Path(args.out).resolve() if args.out else run / "analysis"
     if out.exists():
         raise FileExistsError(f"Analysis output already exists; use a new --out: {out}")
-    manifest, comparisons, labels, closure = analyze(run)
+    reproject = getattr(args, "reproject", False)
+    manifest, comparisons, labels, closure = analyze(run, reproject=reproject)
     mean_rows = [r for r in comparisons if r["seed"] == "mean"]
     summary = []
     terrain_rows = []
@@ -117,6 +127,8 @@ def main(args):
                 "rmse_db_on_positive_overlap_not_challenge_score": float(np.sqrt(sse / count)) if count else None})
     out.mkdir(parents=True)
     write_json(out / "summary.json", {"scope": manifest["experiment"]["scope"],
+        "grid_source": {"reprojected_from_cell_gain": reproject,
+                        "barycentric_zero_tolerance": BARYCENTRIC_ZERO_TOLERANCE if reproject else None},
         "interpretation": "Signed marginal mechanism removal effects; not disjoint energy fractions. Zero means zero finite-sample estimate, not proven absence of a physical path.",
         "contribution_summary": summary, "label_diagnostics": label_summary,
         "closure_diagnostics": closure})
@@ -146,4 +158,6 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--run", required=True)
     p.add_argument("--out", help="New directory; default RUN/analysis")
+    p.add_argument("--reproject", action="store_true",
+                   help="Recompute grids from saved cell_gain using current interpolation; raw files are unchanged")
     main(p.parse_args())

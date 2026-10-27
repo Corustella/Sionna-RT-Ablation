@@ -3,6 +3,8 @@
 import numpy as np
 from scipy.spatial import Delaunay
 
+BARYCENTRIC_ZERO_TOLERANCE = 1e-12
+
 
 def triangulate(height, spacing, diagonal="nw_se"):
     height = np.asarray(height, np.float64)
@@ -46,6 +48,10 @@ class GridProjector:
         if self.weights.size and self.weights.min() < -1e-8:
             raise ValueError("Unexpected negative interpolation weight")
         self.weights = np.maximum(self.weights, 0)
+        # Grid nodes lie on centroid edges. Roundoff in the zero third weight
+        # must not turn a zero-hit cell into an arbitrarily weak positive gain.
+        # This is a dimensionless geometry tolerance, not a path-gain floor.
+        self.weights[self.weights < BARYCENTRIC_ZERO_TOLERANCE] = 0
         self.weights /= self.weights.sum(1, keepdims=True)
         self.vertices = triangulation.simplices[selected]
 

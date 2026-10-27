@@ -125,6 +125,13 @@ python analyze_ablation.py --run runs/pilot58_10m
 
 `label_diagnostics`仅在“官方有效、插值可覆盖、模拟功率为正”的交集报告RMSE，并同时报告缺失数量。**这不是完整官方masked RMSE，也不能跨配置忽略分母差异直接比较。** 重点先查看full与标签的偏差，理解重建场景的适用范围。
 
+早期版本（含 `cf5d143`）的重心插值可能保留本应为零的微小浮点权重，使少数零命中像素产生假正功率和极端dB值。当前将小于 `1e-12` 的无量纲重心权重归零并重新归一；这不是功率阈值，不删除真实弱信号。已有产物无需重跑RT，可从保存的面元功率重投影，原文件保持不变：
+
+```bash
+python analyze_ablation.py --run runs/pilot58_10m \
+  --reproject --out results/pilot58_10m_reprojected
+```
+
 ## 几何、聚合及适用边界
 
 - 1 m格点的 `x=column, y=row, z=height`，每格固定NW–SE对角线，法向由三角形决定，不进行顶点法向平滑；也支持显式NE–SW对角线对照。
