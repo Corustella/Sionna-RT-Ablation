@@ -264,8 +264,9 @@ def main(args):
         report = {"partition_counts": plan["selection"]["counts"], "execution_subset": args.subset,
             "selected_scenes_this_invocation": len(chosen), "seeds": plan["seeds"],
             "rays_per_scene_per_seed": plan["samples_per_tx"], "mode": args.mode,
-            "map_trace_count_this_invocation": len(chosen)*len(plan["seeds"]) if args.mode != "paths" else 0,
-            "map_launched_rays_this_invocation": len(chosen)*len(plan["seeds"])*plan["samples_per_tx"] if args.mode != "paths" else 0,
+            "map_trace_budget_for_requested_subset": len(chosen)*len(plan["seeds"]) if args.mode != "paths" else 0,
+            "map_ray_budget_for_requested_subset": len(chosen)*len(plan["seeds"])*plan["samples_per_tx"] if args.mode != "paths" else 0,
+            "budget_note": "planned_subset_budget_includes_files_that_resume_will_skip; not_an_actual_launch_counter",
             "path_settings": plan["paths"], "out": str(out), "scope": plan["scope"]}
         print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
         if args.dry_run:

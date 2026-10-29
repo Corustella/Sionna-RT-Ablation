@@ -137,16 +137,18 @@ def main(args):
     if args.analyze_only:
         previous = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
         request = previous["request"]
-        if request["dataset"] != str(root) or request["subset"] != args.subset:
-            raise ValueError("Analysis dataset/subset differs from the saved ablation request")
+        # A downloaded dataset can live at a different absolute path. Match its
+        # immutable manifest rather than requiring the original server path.
+        if request["dataset_manifest"] != manifest or request["subset"] != args.subset:
+            raise ValueError("Analysis dataset manifest/subset differs from the saved ablation request")
         analyze(root, out, args.results, plan, samples, request["configs"], request["controls"])
         return
     request = {"dataset": str(root), "dataset_manifest": manifest, "subset": args.subset,
                "configs": args.configs, "controls": args.controls}
     case_count = sum(len(cases(s, args.configs, args.controls)) for s in samples) * len(plan["seeds"])
-    print(json.dumps({"scenes": len(samples), "independent_trace_count": case_count,
+    print(json.dumps({"scenes": len(samples), "independent_trace_budget": case_count,
                       "rays_per_trace": plan["samples_per_tx"],
-                      "total_extra_rays": case_count * plan["samples_per_tx"], "out": str(out)}, indent=2), flush=True)
+                      "extra_ray_budget": case_count * plan["samples_per_tx"], "out": str(out)}, indent=2), flush=True)
     if args.dry_run:
         return
     for sample in samples:
