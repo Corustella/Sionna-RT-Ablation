@@ -154,3 +154,9 @@ python analyze_ablation.py --run runs/pilot58_10m \
 - [挑战官方参考代码](https://github.com/anderspearson206/lunar-radiomap-challenge) 与本地数据包metadata：频段、材料、TX/RX等参数。
 
 文献/实现支持上述物理和数值定义；本项目贡献程度必须由实际运行给出。当前代码不预设镜面、漫散射、透射的排序，不把试跑结果写成正式结论。
+
+## 同次追踪的传播分量数据集
+
+新增的528地形、5.775GHz、每seed40亿射线数据生成与路径诊断见
+[DATASET.md](DATASET.md)。正式数据放 `dataset/`，额外消融/复算放 `runs/`、
+汇总放 `results/`。原有六组消融入口保持可用。

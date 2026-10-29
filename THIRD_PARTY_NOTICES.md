@@ -4,8 +4,21 @@
 formula from NVIDIA Sionna RT v1.1.0, `src/sionna/rt/utils/ray_tracing.py`.
 The adaptation adds a global index offset and total-point denominator so
 successive bounded-memory calls evaluate disjoint parts of the original
-lattice. The rest of the upstream ray-tracing implementation is used through
-the installed package, not copied into this repository.
+lattice.
+
+`component_solver.py` adapts `_shoot_and_bounce` from
+`src/sionna/rt/radio_map_solvers/radio_map_solver.py` and the cell weighting
+from `mesh_radio_map.py`, frozen at v1.1.0 (commit
+`38ff0af9ffcade89ab06391b2ebb39293ae484b2`). Changes add path-history bits,
+five disjoint accumulation buffers and uint64 hit counters, and look up the
+launch lattice dynamically for bounded batches. Transport, RNG draws and
+cell normalization are preserved. All other solver methods use the installed
+package. The upstream license notice is in `LICENSE-SIONNA`; the Apache-2.0
+license text is in `LICENSE-APACHE`.
+
+Sources:
+https://github.com/NVlabs/sionna-rt/blob/v1.1.0/src/sionna/rt/radio_map_solvers/radio_map_solver.py
+https://github.com/NVlabs/sionna-rt/blob/v1.1.0/src/sionna/rt/radio_map_solvers/mesh_radio_map.py
 
 Source: https://github.com/NVlabs/sionna-rt/blob/v1.1.0/src/sionna/rt/utils/ray_tracing.py
 
