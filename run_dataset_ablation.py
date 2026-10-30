@@ -154,8 +154,8 @@ def main(args):
     for sample in samples:
         for seed in plan["seeds"]:
             read_map(map_path(root, sample, seed), plan["samples_per_tx"])
-    from rt_backend import RTBackend
-    backend = RTBackend(plan["backend"])
+    from component_backend import ComponentBackend
+    backend = ComponentBackend(plan["backend"])
     version = code_version()
     if version["dirty"] or version != manifest["code"] or backend.versions != manifest["runtime"]:
         raise ValueError("Ablation requires the same clean code and RT runtime as the full dataset")

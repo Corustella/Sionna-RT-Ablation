@@ -15,6 +15,13 @@ class ComponentBackend(RTBackend):
         from component_solver import FamilyRadioMapSolver
         self.family_solver = FamilyRadioMapSolver()
 
+    def solve(self, scene, measurement, samples, seed, max_depth, flags,
+              total_samples=None, sample_offset=0):
+        """Use the same FP64 reductions for the new dataset's switch ablations."""
+        gain, _, _ = self.solve_components(scene, measurement, samples, seed, max_depth,
+                                         total_samples, sample_offset, flags)
+        return gain[0]
+
     def solve_components(self, scene, measurement, samples, seed, max_depth,
                          total_samples=None, sample_offset=0, flags=None):
         total_samples = samples if total_samples is None else total_samples

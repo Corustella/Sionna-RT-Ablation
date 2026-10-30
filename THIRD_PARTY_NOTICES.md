@@ -16,6 +16,11 @@ cell normalization are preserved. All other solver methods use the installed
 package. The upstream license notice is in `LICENSE-SIONNA`; the Apache-2.0
 license text is in `LICENSE-APACHE`.
 
+The component extension now casts each unchanged FP32 weighted contribution
+to FP64 before independently reducing the total and family maps. This fixes
+schedule-dependent FP32 atomic accumulation drift in dense angular chunks;
+field transport, material sampling and RNG calls are unchanged.
+
 Sources:
 https://github.com/NVlabs/sionna-rt/blob/v1.1.0/src/sionna/rt/radio_map_solvers/radio_map_solver.py
 https://github.com/NVlabs/sionna-rt/blob/v1.1.0/src/sionna/rt/radio_map_solvers/mesh_radio_map.py

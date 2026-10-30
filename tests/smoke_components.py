@@ -13,6 +13,7 @@ from ablation_core import batch_plan, switches
 from component_backend import ComponentBackend
 from component_core import ComponentAccumulator, validate_components
 from terrain_mesh import triangulate
+from rt_backend import RTBackend
 
 
 def main(args):
@@ -33,7 +34,7 @@ def main(args):
         for batch in batch_plan(40000, 13000, 0):
             gain, hits, positive = backend.solve_components(scene, measurement, batch["samples"], batch["seed"], 6,
                 total_samples=40000, sample_offset=batch["offset"])
-            reference = backend.solve(scene, measurement, batch["samples"], batch["seed"], 6, switches("full"),
+            reference = RTBackend.solve(backend, scene, measurement, batch["samples"], batch["seed"], 6, switches("full"),
                 total_samples=40000, sample_offset=batch["offset"])
             np.testing.assert_allclose(gain[0], reference, rtol=1e-5, atol=0)
             accumulator.add(gain, hits, positive, batch["samples"])

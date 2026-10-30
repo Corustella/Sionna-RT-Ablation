@@ -15,6 +15,10 @@ from component_core import (ComponentAccumulator, geometry_strata, loss_db,
 from dataset_selection import freeze_selection
 from generate_dataset import map_path, read_map, run_map
 from terrain_mesh import GridProjector, triangulate
+from ablation_core import write_json, write_npz
+from dataset_resume import FP32_COMPONENT_COMMIT, resume_manifest
+import copy
+import json
 
 
 class ComponentTests(unittest.TestCase):
@@ -107,6 +111,37 @@ class SelectionTests(unittest.TestCase):
 
 
 class ResumeTests(unittest.TestCase):
+    def test_legacy_fp32_checkpoint_resumes_only_the_remaining_rays(self):
+        class Backend:
+            offsets = []
+
+            def solve_components(self, scene, measurement, samples, seed, depth, total_samples, sample_offset):
+                self.offsets.append(sample_offset)
+                gain, hits = np.zeros((6, 8)), np.zeros((5, 8), np.uint64)
+                gain[0] = gain[1] = 4.
+                hits[0] = 1
+                return gain, hits, hits
+        _, _, centers, _ = triangulate(np.zeros((3, 3)), 1.)
+        projector = GridProjector(centers, (3, 3), 1.)
+        plan = {"samples_per_tx": 6, "rays_per_batch": 2, "max_depth": 3,
+                "checkpoint_every_batches": 1, "log_every_batches": 100}
+        sample = {"partition": "fit", "sample_id": "legacy"}
+        backend = Backend()
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary)
+            final = map_path(root, sample, 0)
+            weighted, hits = np.zeros((6, 8)), np.zeros((5, 8), np.uint64)
+            weighted[0] = weighted[1] = 8.
+            hits[0] = 2
+            write_npz(final.with_name("seed0.progress.npz"), weighted_gain=weighted,
+                hit_count=hits, positive_hit_count=hits, samples=4, completed_batches=2, elapsed_seconds=1.)
+            run_map(backend, None, None, projector, 8, plan, sample, 0, root, float32_samples=4)
+            self.assertEqual(backend.offsets, [4])
+            np.testing.assert_allclose(read_map(final, 6, 8)[0], 16/6)
+            with np.load(final) as saved:
+                self.assertEqual(int(saved["float32_accumulation_samples"]), 4)
+                self.assertEqual(int(saved["float64_accumulation_samples"]), 2)
+
     def test_resume_includes_zero_chunk_and_never_repeats_completed_chunks(self):
         class Backend:
             fail = True
@@ -139,6 +174,53 @@ class ResumeTests(unittest.TestCase):
             self.assertFalse(map_path(root, sample, 0).with_name("seed0.progress.npz").exists())
             run_map(*arguments)
             self.assertEqual(backend.offsets, [0, 2, 4, 4])
+
+
+class UpgradeTests(unittest.TestCase):
+    def previous(self):
+        return {"experiment": {"samples_per_tx": 6, "rays_per_batch": 2, "seeds": [0, 1],
+                    "data_files": ["unchanged"], "max_depth": 100},
+                "code": {"commit": FP32_COMPONENT_COMMIT, "dirty": False},
+                "runtime": {"sionna-rt": "1.1.0"}}
+
+    def test_upgrade_requires_opt_in_and_keeps_original_arrays_and_manifest(self):
+        previous = self.previous()
+        plan = {**previous["experiment"], "native_gain_accumulation_dtype": "float64"}
+        version = {"commit": "tested-numeric-fix", "dirty": False}
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary)
+            write_json(root / "manifest.json", previous)
+            path = root / "maps/fit/legacy/seed0.progress.npz"
+            write_npz(path, samples=4, completed_batches=2, weighted_gain=np.ones((6, 8)))
+            original = path.read_bytes()
+            with self.assertRaises(ValueError):
+                resume_manifest(root, plan, version, previous["runtime"])
+            result = resume_manifest(root, plan, version, previous["runtime"], True)
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(json.loads((root / "manifest.before_fp64.json").read_text()), previous)
+            self.assertEqual(result["accumulation_upgrade"]["float32_samples_by_map"], {"maps/fit/legacy/seed0.npz": 4})
+            self.assertEqual(resume_manifest(root, plan, version, previous["runtime"]), result)
+
+    def test_upgrade_rejects_changed_settings_unknown_versions_and_runtime(self):
+        for change in ("samples_per_tx", "rays_per_batch", "seeds", "data_files", "max_depth", "code", "runtime"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                previous = self.previous()
+                plan = {**copy.deepcopy(previous["experiment"]), "native_gain_accumulation_dtype": "float64"}
+                runtime = dict(previous["runtime"])
+                if change == "code":
+                    previous["code"]["commit"] = "unsupported-source"
+                elif change == "runtime":
+                    runtime["sionna-rt"] = "changed"
+                elif change in ("seeds", "data_files"):
+                    plan[change] = ["changed"]
+                else:
+                    plan[change] += 1
+                root = Path(temporary)
+                write_json(root / "manifest.json", previous)
+                with self.assertRaises(ValueError):
+                    resume_manifest(root, plan, {"commit": "fix", "dirty": False}, runtime, True)
+                self.assertFalse((root / "manifest.before_fp64.json").exists())
+                self.assertEqual(json.loads((root / "manifest.json").read_text()), previous)
 
 
 if __name__ == "__main__":

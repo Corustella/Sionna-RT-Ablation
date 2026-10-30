@@ -16,6 +16,7 @@ from ablation_core import batch_plan, switches, write_json, write_npz
 from component_core import (ComponentAccumulator, FAMILIES, GAIN_FIELDS, SCHEMA,
                             geometry_strata, loss_db, select_receivers, validate_components)
 from dataset_selection import freeze_selection
+from dataset_resume import resume_manifest
 from lunar_data import LunarData
 from run_ablation import code_version, hardware_info
 from terrain_mesh import GridProjector, triangulate
@@ -75,6 +76,7 @@ def make_plan(args, data, selection=None):
         "batch_seed_rule": "uint32_SeedSequence([requested_seed,batch_index])",
         "gain_order": list(GAIN_FIELDS), "family_order": list(FAMILIES),
         "native_solver_dtype": "float32", "batch_gain_accumulation_dtype": "float64",
+        "native_gain_accumulation_dtype": "float64",
         "hit_counter_dtype": "uint64", "mesh_coordinates": "x=column*spacing,y=row*spacing,z=H",
         "scene_geometry": "open_heightfield_no_sidewalls_or_bottom_actual_FP32_vertices_saved",
         "measurement": "same_mesh_translated_up_in_z_by_metadata_rx_height",
@@ -120,13 +122,15 @@ def read_map(path, samples=None, cells=None):
         return gain
 
 
-def run_map(backend, scene, measurement, projector, cells, plan, sample, seed, out):
+def run_map(backend, scene, measurement, projector, cells, plan, sample, seed, out, float32_samples=0):
     final = map_path(out, sample, seed)
     if final.exists():
         read_map(final, plan["samples_per_tx"], cells)
         print(f"skip map {sample['sample_id']} seed={seed}", flush=True)
         return
     checkpoint = final.with_name(final.stem + ".progress.npz")
+    if float32_samples and not checkpoint.exists():
+        raise ValueError(f"Recorded FP32 checkpoint is missing; restore it before resume: {checkpoint}")
     accumulator = ComponentAccumulator(cells)
     schedule = batch_plan(plan["samples_per_tx"], plan["rays_per_batch"], seed)
     completed, elapsed = 0, 0.0
@@ -137,9 +141,12 @@ def run_map(backend, scene, measurement, projector, cells, plan, sample, seed, o
             accumulator.weighted = saved["weighted_gain"].copy()
             accumulator.hits = saved["hit_count"].copy()
             accumulator.positive_hits = saved["positive_hit_count"].copy()
+            if "float32_accumulation_samples" in saved and int(saved["float32_accumulation_samples"]) != float32_samples:
+                raise ValueError(f"Checkpoint accumulation provenance mismatch: {checkpoint}")
         if (not 0 <= completed <= len(schedule) or accumulator.samples <= 0
                 or accumulator.samples != sum(b["samples"] for b in schedule[:completed])
-                or accumulator.weighted.shape != (6, cells) or not np.isfinite(elapsed) or elapsed < 0):
+                or accumulator.weighted.shape != (6, cells) or not 0 <= float32_samples <= accumulator.samples
+                or not np.isfinite(elapsed) or elapsed < 0):
             raise ValueError(f"Invalid progress file: {checkpoint}")
         validate_components(accumulator.mean(), accumulator.hits, accumulator.positive_hits)
     for i in range(completed, len(schedule)):
@@ -152,7 +159,8 @@ def run_map(backend, scene, measurement, projector, cells, plan, sample, seed, o
         if (i+1) % plan["checkpoint_every_batches"] == 0 or i+1 == len(schedule):
             write_npz(checkpoint, weighted_gain=accumulator.weighted, hit_count=accumulator.hits,
                 positive_hit_count=accumulator.positive_hits, samples=np.int64(accumulator.samples),
-                completed_batches=np.int64(i+1), elapsed_seconds=elapsed)
+                completed_batches=np.int64(i+1), elapsed_seconds=elapsed,
+                float32_accumulation_samples=np.int64(float32_samples))
         if i == completed or (i+1) % plan["log_every_batches"] == 0 or i+1 == len(schedule):
             print(f"{sample['sample_id']} seed={seed}: batch {i+1}/{len(schedule)}, "
                   f"rays={accumulator.samples}, compute={elapsed:.2f}s", flush=True)
@@ -166,6 +174,8 @@ def run_map(backend, scene, measurement, projector, cells, plan, sample, seed, o
         interpolation_footprint=projector.footprint, hit_count=accumulator.hits,
         positive_hit_count=accumulator.positive_hits, unresolved_or_zero=all_gain == 0,
         samples=np.int64(accumulator.samples), seed=np.int64(seed), elapsed_seconds=elapsed,
+        float32_accumulation_samples=np.int64(float32_samples),
+        float64_accumulation_samples=np.int64(accumulator.samples-float32_samples),
         closure_max_relative_error=closure["max_relative_error"])
     # Only our own redundant progress file is removed, after the atomic final write.
     checkpoint.unlink(missing_ok=True)
@@ -188,6 +198,9 @@ def run_paths(backend, scene, geometry, plan, sample, seed, out):
             continue
         actual_seed = int(np.random.SeedSequence([seed, chunk_index]).generate_state(1)[0])
         positions = geometry["cell_centers"][chosen].astype(np.float32)
+        print(f"paths {sample['sample_id']} seed={seed}: starting RX {offset+1}-{offset+len(chosen)}/{len(cells)}, "
+              f"samples/src={settings['samples_per_src_per_rx_batch']}, depth={settings['max_depth']}; "
+              "first call may compile GPU kernels", flush=True)
         started = time.perf_counter()
         paths = backend.point_paths(scene, positions, actual_seed,
             settings["samples_per_src_per_rx_batch"], settings["max_depth"], settings["max_candidates_per_src"])
@@ -272,26 +285,32 @@ def main(args):
         if args.dry_run:
             print("Dry run: no RT import, simulation, or files written.", flush=True)
             return
+        if args.upgrade_fp32_accumulation and not args.resume:
+            raise ValueError("--upgrade-fp32-accumulation requires --resume")
+        if args.upgrade_fp32_accumulation and not (out / "manifest.json").exists():
+            raise ValueError("FP32 upgrade requires an existing legacy manifest; check --out")
         version = code_version()
         if version["dirty"] or version["commit"] is None:
             raise ValueError("Dataset generation requires a committed, clean checkout for verifiable resume")
+        print("Initializing Sionna/Mitsuba backend (first call may compile GPU kernels)...", flush=True)
         from component_backend import ComponentBackend
         backend = ComponentBackend(args.backend)
+        print("RT backend ready; checking output manifest...", flush=True)
         if out.exists():
             if not args.resume:
                 raise FileExistsError(f"Output exists: {out}; use identical settings with --resume")
-            previous = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
-            if previous["experiment"] != plan or previous["code"] != version or previous["runtime"] != backend.versions:
-                raise ValueError("Resume requires identical plan, data, code and RT runtime; use a new --out for changed settings")
+            manifest = resume_manifest(out, plan, version, backend.versions, args.upgrade_fp32_accumulation)
         else:
             out.mkdir(parents=True)
             write_json(out / "manifest.json", {"created_utc": datetime.now(timezone.utc).isoformat(),
                 "experiment": plan, "code": version, "runtime": backend.versions, "command": sys.argv,
                 "hardware": hardware_info(), "python": sys.version, "platform": platform.platform()})
             save_selection(out / "selection.csv", plan["selection"]["samples"])
+            manifest = {}
         invocation_start = time.perf_counter()
         projector = None
         for sample in chosen:
+            print(f"Preparing scene {sample['sample_id']} ({sample['partition']})...", flush=True)
             item = data[sample["source_split"]].sample(sample["index"], ["58"])
             vertices, faces, centers, _ = triangulate(item["height_m"],
                 plan["metadata"]["resolution_m_per_px"], plan["diagonal"])
@@ -302,7 +321,10 @@ def main(args):
                 geometry = save_geometry(backend, scene, measurement, item, plan, sample, out, projector)
                 for seed in plan["seeds"]:
                     if args.mode != "paths":
-                        run_map(backend, scene, measurement, projector, len(faces), plan, sample, seed, out)
+                        boundary = manifest.get("accumulation_upgrade", {}).get("float32_samples_by_map", {})
+                        key = map_path(out, sample, seed).relative_to(out).as_posix()
+                        run_map(backend, scene, measurement, projector, len(faces), plan, sample, seed, out,
+                                float32_samples=boundary.get(key, 0))
                     if args.mode != "maps" and sample["representative"]:
                         run_paths(backend, scene, geometry, plan, sample, seed, out)
             finally:
@@ -343,6 +365,8 @@ def parser():
                    help="Separate PathSolver samples_per_src per RX batch; not the RadioMap 4e9 budget")
     p.add_argument("--path-max-candidates", type=int, default=250000)
     p.add_argument("--resume", action="store_true")
+    p.add_argument("--upgrade-fp32-accumulation", action="store_true",
+                   help="Explicitly upgrade compatible c0408be checkpoints; preserve old FP32 sums and record the boundary")
     p.add_argument("--dry-run", action="store_true")
     return p
 

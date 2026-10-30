@@ -146,6 +146,8 @@ def main(args):
                 gain = np.stack([result[key] for key in GAIN_FIELDS[:6]])
                 closure = validate_components(gain, result["hit_count"], result["positive_hit_count"])
                 row = {**identity, "seed": seed, "samples": int(result["samples"]), **closure,
+                    "float32_accumulation_samples": int(result["float32_accumulation_samples"]) if "float32_accumulation_samples" in result else int(result["samples"]),
+                    "float64_accumulation_samples": int(result["float64_accumulation_samples"]) if "float64_accumulation_samples" in result else 0,
                     "elapsed_seconds": float(result["elapsed_seconds"]),
                     **label_diagnostic(result["grid_gain"][0], target, mask, result["interpolation_footprint"])}
                 integrated = np.sum(gain * geometry["cell_areas"], axis=1)

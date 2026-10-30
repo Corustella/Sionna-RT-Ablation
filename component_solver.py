@@ -28,7 +28,13 @@ upstream = importlib.import_module("sionna.rt.radio_map_solvers.radio_map_solver
 class FamilyMeshRadioMap(MeshRadioMap):
     def __init__(self, scene, meas_surface):
         super().__init__(scene, meas_surface)
-        self.family_gain = dr.zeros(mi.TensorXf, [5, self.num_tx, self.cells_count])
+        # Dense angular chunks can deposit tens of thousands of contributions
+        # into one cell. Separate FP32 atomic sums then drift beyond closure
+        # tolerance depending on GPU scheduling. Keep transport/weights in FP32,
+        # but accumulate BOTH the independent total and families in FP64.
+        tensor64 = dr.tensor_t(mi.Float64)
+        self._pathgain_map = dr.zeros(tensor64, [self.num_tx, self.cells_count])
+        self.family_gain = dr.zeros(tensor64, [5, self.num_tx, self.cells_count])
         count = 5 * self.num_tx * self.cells_count
         self.hit_count = dr.zeros(mi.UInt64, count)
         self.positive_hit_count = dr.zeros(mi.UInt64, count)
@@ -51,7 +57,8 @@ class FamilyMeshRadioMap(MeshRadioMap):
                                 - dr.square(dr.dot(v1, v2)))
         w *= dr.rcp(cell_area)
         a *= w
-        dr.scatter_reduce(dr.ReduceOp.Add, self._pathgain_map.array, a, tensor_ind, active=hit)
+        contribution = mi.Float64(a)
+        dr.scatter_reduce(dr.ReduceOp.Add, self._pathgain_map.array, contribution, tensor_ind, active=hit)
 
         has_diffuse = (history & int(InteractionType.DIFFUSE)) != 0
         has_trans = (history & int(InteractionType.REFRACTION)) != 0
@@ -60,14 +67,16 @@ class FamilyMeshRadioMap(MeshRadioMap):
         family = dr.select(has_diffuse, dr.select(has_trans, 4, 2),
                            dr.select(has_trans, 3, dr.select(history == 0, 0, 1)))
         index = family * (self.num_tx * self.cells_count) + tensor_ind
-        dr.scatter_reduce(dr.ReduceOp.Add, self.family_gain.array, a, index, active=hit)
+        dr.scatter_reduce(dr.ReduceOp.Add, self.family_gain.array, contribution, index, active=hit)
         dr.scatter_reduce(dr.ReduceOp.Add, self.hit_count, mi.UInt64(1), index, active=hit)
         dr.scatter_reduce(dr.ReduceOp.Add, self.positive_hit_count, mi.UInt64(1), index,
                           active=hit & (a > 0))
 
     def finalize(self):
-        super().finalize()
-        self.family_gain *= dr.square(self._wavelength * dr.rcp(4. * dr.pi))
+        # Compute the same FP32 scaling as upstream, then retain FP64 map sums.
+        scaling = mi.Float64(dr.square(self._wavelength * dr.rcp(4. * dr.pi)))
+        self._pathgain_map *= scaling
+        self.family_gain *= scaling
 
 
 class FamilyRadioMapSolver(RadioMapSolver):

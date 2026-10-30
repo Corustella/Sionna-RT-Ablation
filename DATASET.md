@@ -54,8 +54,9 @@
 40 亿射线按一个全局 Fibonacci 点集分批，默认每批 100 万，使用全局索引，
 不是重复同一个较小点集。每批 seed=`SeedSequence([seed,batch_index])`。沿用上游
 固定初始方向，因此 seed 只改变交互随机数，**不代表独立初始角度采样**。
-每批内部求解累加为 FP32，按实际射线数在 CPU 以 FP64 加权平均（零命中批次
-同样有权重）；输出 float64 不意味着追踪本身是 FP64。
+电场运输、材料采样和逐射线权重仍为 FP32，总图与五分量在 GPU 以 FP64
+分别累加，再按实际射线数在 CPU 以 FP64 加权平均（零命中批次同样有权重）。
+这不是全FP64电磁追踪。旧FP32断点升级后的前缀精度按原样记录，见下文。
 
 复杂度：R 条射线、最大深度 D、M 个三角形、批大小 B，把单次场景求交视为一操作时，状态推进约 O(RD)，
 分量新增常数次 scatter；地图/质量缓冲 O(M)，射线状态 O(B)，加上求交加速结构。
@@ -131,6 +132,55 @@ RadioMap 的加权功率。分量图已在 RadioMap 内使用原权重直接分�
 
 ## 服务器同步和运行
 
+### 修复旧 c0408be 的闭合错误并保留断点
+
+若旧程序在某批报 `Same-trace closure failed`，反复resume会再次遇到同一方向
+批次。高命中单元的独立FP32原子累加存在与GPU调度有关的舍入差；现在只把
+总图和五分量的累加缓冲改为FP64，电场、权重、材料、射线序列和seed规则不变。
+闭合阈值仍为5e-5，不用增益下限、重定义总图或放宽阈值掩盖问题。
+
+先停止仍使用旧代码的任务，避免新旧进程或maps/paths任务同时写同一dataset。
+然后在原Sionna环境执行：
+
+```bash
+cd ~/liuanda/Sionna-RT-Ablation
+git status
+git fetch origin
+git switch research/component-dataset
+git pull --ff-only
+
+python generate_dataset.py \
+  --data-root ~/liuanda/LunarRM \
+  --out ~/liuanda/Sionna-RT-Ablation/dataset \
+  --subset all --mode maps --resume \
+  --upgrade-fp32-accumulation
+```
+
+该开关只支持已知干净提交 `c0408be` 的产物；要求数据身份、runtime、物理参数、
+seed、批大小和其他计划设置完全相同，不能用它绕过其他代码/数据变化。
+先备份原manifest为 `manifest.before_fp64.json`，再记录每个旧地图/断点的
+FP32采样边界。已完成地图直接跳过；现有weighted_gain与命中计数不修改，只计算
+尚未完成的批次。比如32亿断点从3201批继续，只补最后8亿。
+
+升级后地图及checkpoint记录 `float32_accumulation_samples`；最终地图另存
+`float64_accumulation_samples`。因此混合精度前缀不会被虚称成全程FP64累加。
+缺失的旧断点不会自动重建；需恢复原文件或使用新输出目录。后续正常resume
+可省略升级开关。不要手动编辑manifest中的commit来强行续跑。
+
+maps完成后，再单独执行路径任务：
+
+```bash
+python generate_dataset.py \
+  --data-root ~/liuanda/LunarRM \
+  --out ~/liuanda/Sionna-RT-Ablation/dataset \
+  --subset representative --mode paths --resume
+```
+
+路径模式打印的JSON只是计划，不代表卡死。现在会依次打印后端初始化、场景准备、
+每批RX开始和完成；第一次调用可能编译GPU内核。点路径算法没有因本修复改变。
+若已有旧提交生成的独立开关消融目录，其resume仍要求原代码；不要覆盖旧目录，
+在新的runs目录运行新消融。新独立消融也使用FP64累加，避免不同累加精度制造伪差异。
+
 先激活服务器上**已确认可用**的 Sionna 环境。依赖沿用 `requirements.txt`，
 不需要新增包；环境还未安装时运行 `python -m pip install -r requirements.txt`。
 以下由用户在 SSH 服务器执行，本地代码修改不代表已在服务器运行。
@@ -175,7 +225,7 @@ python run_dataset_ablation.py \
 
 试点确认后，补齐528个场景地图，再生成32个场景的路径明细。两步共用同一个
 manifest，模式/子集允许变化；其他物理/采样参数、批大小、代码、环境必须一致。
-**不要在试点与全量之间切换代码提交**；若确有修复，应保留旧目录并新建输出。
+代码变化默认拒绝续跑；仅下述已核对的FP32累加修复提供显式兼容升级。
 
 ```bash
 python generate_dataset.py \
